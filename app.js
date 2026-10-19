@@ -17,7 +17,7 @@ const idxHoy = () => (new Date().getDay() + 6) % 7;
 
 /* ---------- estado ---------- */
 function nuevo() {
-  return { cfg: { peso: null, factor: 1.8, aguaMeta: 8 }, logs: [], agua: {}, plan: PLAN_INICIAL.map(d => d.slice()), checked: {}, mis: [] };
+  return { cfg: { peso: null, factor: 1.8, aguaMeta: 8, mant: null, objetivo: 'mantener' }, logs: [], agua: {}, plan: PLAN_INICIAL.map(d => d.slice()), checked: {}, mis: [] };
 }
 let S;
 try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
@@ -31,6 +31,78 @@ const meta = () => S.cfg.peso ? Math.round(S.cfg.peso * S.cfg.factor) : null;
 const sesionesReloj = () => { try { return JSON.parse(localStorage.getItem(KEY_RELOJ) || '[]').filter(s => s && s.start); } catch (e) { return []; } };
 const logsDe = dk => S.logs.filter(l => diaKey(l.t) === dk).sort((a, b) => a.t - b.t);
 const protDe = dk => logsDe(dk).reduce((a, l) => a + (l.p || 0), 0);
+const kcalDe = dk => logsDe(dk).reduce((a, l) => a + (l.k || 0), 0);
+
+/* ---------- combustible frente al entreno ----------
+   Sesión (del Reloj anómalo): duración ≈ descansos + 3 s por rep + isometrías.
+   Intensidad I ∈ [0,1] = ½·(congestión media / 0,7) + ½·(tiempo bajo congestión / duración).
+   MET de pesas = 3,5 + 2,5·I (Compendium: 3,5 ligero … 6 vigoroso); gasto neto = (MET − 1)·peso·horas.
+   Necesidad del día = mantenimiento·(objetivo) + gasto neto de las sesiones. */
+const OBJ = { ganar: { f: 1.1, n: 'Ganar músculo (+10 %)' }, mantener: { f: 1, n: 'Mantener' }, bajar: { f: .85, n: 'Bajar grasa (−15 %)' } };
+const POST_GKG = .3, PRE_H = 4;
+const mantenimiento = () => S.cfg.mant || (S.cfg.peso ? Math.round(S.cfg.peso * 31 / 10) * 10 : null);
+function analizarSesion(s) {
+  const sets = s.sets || [];
+  let dur = 0, Ps = [];
+  sets.forEach(r => {
+    const n = parseInt(r.reps, 10) || 0, hold = r.rir === '—';
+    dur += (r.rest || 0) + (hold ? n : n * 3);
+    if (r.P != null) Ps.push(+r.P);
+  });
+  if (!sets.length) dur = (s.series || 0) * 90;
+  dur = Math.max(dur, 60);
+  const Pm = Ps.length ? Ps.reduce((a, b) => a + b, 0) / Ps.length : .5;
+  const I = Math.max(0, Math.min(1, .5 * Math.min(1, Pm / .7) + .5 * Math.min(1, (s.tuc || 0) / dur)));
+  const met = 3.5 + 2.5 * I, peso = S.cfg.peso || 70;
+  const t0 = Date.parse(s.start);
+  return { s, t0, fin: t0 + dur * 1000, dur, I, met, kcal: Math.round((met - 1) * peso * dur / 3600),
+    nivel: I < .4 ? 'suave' : I < .7 ? 'moderada' : 'fuerte' };
+}
+const sesionesDe = dk => sesionesReloj().filter(s => diaKey(Date.parse(s.start)) === dk).map(analizarSesion).sort((a, b) => a.t0 - b.t0);
+function necesidad(dk) {
+  const M = mantenimiento(); if (!M) return null;
+  const ent = sesionesDe(dk).reduce((a, x) => a + x.kcal, 0);
+  return { base: Math.round(M * OBJ[S.cfg.objetivo].f), ent, total: Math.round(M * OBJ[S.cfg.objetivo].f) + ent };
+}
+// Fracción del día que ya "debería" estar comida: lineal de 7:00 a 21:00.
+const fraccionEsperada = t => { const d = new Date(t), h = d.getHours() + d.getMinutes() / 60; return Math.max(.15, Math.min(1, (h - 7) / 14)); };
+function estadoEnergia(dk, ahora) {
+  const nec = necesidad(dk); if (!nec) return null;
+  const comido = kcalDe(dk), esHoy = dk === diaKey(ahora), frac = esHoy ? fraccionEsperada(ahora) : 1;
+  const esperado = nec.total * frac, r = esperado ? comido / esperado : 1;
+  return { nec, comido, esperado: Math.round(esperado), r, falta: Math.max(0, Math.round(nec.total - comido)),
+    est: r >= .9 ? 'ok' : r >= .75 ? 'atencion' : 'deficit' };
+}
+function chequeosEntreno(dk) {
+  const ls = logsDe(dk), peso = S.cfg.peso || 70;
+  return sesionesDe(dk).map(x => {
+    const antes = S.logs.filter(l => l.t <= x.t0).sort((a, b) => b.t - a.t)[0];
+    const hAntes = antes ? (x.t0 - antes.t) / 3600e3 : null;
+    const post = ls.filter(l => l.t >= x.t0 && l.t <= x.fin + VENTANA_POST_H * 3600e3).reduce((a, l) => a + l.p, 0);
+    const postMeta = Math.round(POST_GKG * peso), abierta = Date.now() < x.fin + VENTANA_POST_H * 3600e3;
+    return { x, hAntes, pre: hAntes != null && hAntes <= PRE_H, post: Math.round(post), postMeta, postOk: post >= postMeta, abierta };
+  });
+}
+// Sugerencias para cubrir lo que falta (proteína, kcal): la que mejor se acerca a ambas.
+const OPCIONES = [
+  ['Batida: 1 scoop de proteína + 1 vaso de leche + 1 guineo', 33, 373],
+  ['Yogur griego + 1 taza de avena', 27, 400],
+  ['2 huevos + 1 pan de agua + 1 guineo', 18, 413],
+  ['Pechuga a la plancha + 1 taza de arroz', 51, 456],
+  ['La bandera', 41, 825],
+  ['Atún en lata + 3 casabes', 32, 470],
+  ['1 scoop de proteína con agua', 23, 114],
+  ['Puñado de maní + 1 guineo', 9, 278]
+];
+function sugerir(pFalta, kFalta) {
+  if (pFalta <= 0 && kFalta <= 0) return null;
+  let mejor = null, d = Infinity;
+  OPCIONES.forEach(o => {
+    const e = Math.abs((o[1] - Math.max(0, pFalta)) / 30) + Math.abs((o[2] - Math.max(0, kFalta)) / 500);
+    if (e < d) { d = e; mejor = o; }
+  });
+  return mejor;
+}
 
 /* ---------- lectura de texto ---------- */
 const NUMS = { un: 1, una: 1, uno: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, medio: .5, media: .5 };
@@ -191,16 +263,7 @@ function vistaHoy() {
   h += M ? `<p class="muted">${p >= M ? 'Meta cumplida.' : `Te faltan <b>${Math.round(M - p)} g</b>.`} Meta: ${fmtN(S.cfg.factor)} g por kg × ${fmtN(S.cfg.peso)} kg.</p>`
     : `<label class="inline">Tu peso (kg) para calcular la meta <input id="pesoRapido" type="number" inputmode="decimal" min="30" max="250" step="0.1" placeholder="75"></label>`;
   h += `</section>`;
-  // entreno
-  h += `<section class="card"><h2>Entreno de hoy</h2>`;
-  if (ses.length) {
-    ses.forEach(s => {
-      const t0 = Date.parse(s.start), post = ls.filter(l => l.t >= t0 && l.t <= t0 + VENTANA_POST_H * 3600e3).reduce((a, l) => a + l.p, 0);
-      h += `<p><b>${esc(s.grupo)}</b> a las ${hora(t0)} · ${s.series} series · ${Math.floor((s.tuc || 0) / 60)} min bajo congestión</p>
-        <p class="muted">Proteína desde que empezaste: <b>${Math.round(post)} g</b>. Lo recomendable son 30–40 g en las horas siguientes.</p>`;
-    });
-  } else h += `<p class="muted">No hay entreno de hoy en el Reloj anómalo. Si entrenas, aparece aquí solo.</p>`;
-  h += `</section>`;
+  h += tarjetaCombustible(hoy, ses.length);
   // agua
   h += `<section class="card"><div class="fila"><h2>Agua</h2><span class="grande">${fmtN(vasos * VASO_ML / 1000)}<small> / ${fmtN(vm * VASO_ML / 1000)} L</small></span></div>
     <div class="vasos" role="group" aria-label="Vasos de agua">`;
@@ -211,6 +274,34 @@ function vistaHoy() {
   h += ls.length ? `<ol class="linea">${ls.map(itemLog).join('')}</ol>` : `<p class="muted">Todavía nada hoy. Toca <b>Agregar</b> para anotar.</p>`;
   h += `</section>`;
   return h;
+}
+const ETQ_EST = { ok: 'Bien', atencion: 'Atención', deficit: 'Déficit' };
+function tarjetaCombustible(dk, hayEntreno) {
+  let h = `<section class="card"><h2>Combustible vs entreno</h2>`;
+  if (!hayEntreno) return h + `<p class="muted">No hay entreno de hoy en el Reloj anómalo. Cuando entrenes, aquí verás si lo que comes alcanza para la intensidad de la sesión.</p></section>`;
+  if (!S.cfg.peso) return h + `<p class="muted">Pon tu peso arriba para calcular el gasto del entreno.</p></section>`;
+  const ch = chequeosEntreno(dk), e = estadoEnergia(dk, Date.now()), p = protDe(dk), M = meta();
+  ch.forEach(c => {
+    h += `<div class="sesion"><div class="fila"><b>${esc(c.x.s.grupo)} · ${hora(c.x.t0)}</b><span class="muted peq">${Math.round(c.x.dur / 60)} min · ${c.x.s.series} series</span></div>
+      <div class="fila"><span class="peq">Intensidad <b>${c.x.nivel}</b></span><span class="peq">≈ <b>${c.x.kcal} kcal</b> extra</span></div>${barra(c.x.I, 1)}</div>`;
+  });
+  h += `<div class="fila"><span>Energía de hoy</span><span class="sem ${e.est}">${ETQ_EST[e.est]}</span></div>
+    ${barra(e.comido, e.nec.total)}
+    <p class="peq">Comiste <b>${e.comido} kcal</b> de <b>${e.nec.total}</b> (mantenimiento ${e.nec.base} + entreno ${e.nec.ent}).
+      A esta hora lo esperable son unas ${e.esperado} kcal.</p>`;
+  h += `<ul class="checks">`;
+  ch.forEach(c => {
+    h += c.hAntes == null ? `<li class="mal">No hay comida anotada antes de entrenar ${esc(c.x.s.grupo.toLowerCase())}.</li>`
+      : `<li class="${c.pre ? 'bien' : 'mal'}">${c.pre ? `Comiste ${fmtN(r1(c.hAntes))} h antes de entrenar.` : `Llegaste al entreno con ${fmtN(r1(c.hAntes))} h sin comer (lo ideal es menos de ${PRE_H} h).`}</li>`;
+    h += `<li class="${c.postOk ? 'bien' : c.abierta ? 'pend' : 'mal'}">Proteína después del entreno: <b>${c.post} de ${c.postMeta} g</b>${c.postOk ? '.' : c.abierta ? ' · todavía estás a tiempo.' : ' · la ventana ya cerró.'}</li>`;
+  });
+  if (M) h += `<li class="${p >= M ? 'bien' : 'pend'}">Proteína del día: ${Math.round(p)} de ${M} g.</li>`;
+  h += `</ul>`;
+  const pF = Math.max(M ? M - p : 0, ...ch.filter(c => c.abierta && !c.postOk).map(c => c.postMeta - c.post));
+  const kF = e.est === 'ok' ? 0 : Math.max(0, e.esperado - e.comido);
+  const sg = (e.est !== 'ok' || ch.some(c => c.abierta && !c.postOk)) ? sugerir(pF, kF) : null;
+  if (sg) h += `<p class="sug">Para cubrirlo: <b>${esc(sg[0])}</b> · ${sg[1]} g de proteína, ${sg[2]} kcal.</p>`;
+  return h + `<p class="muted peq">Estimación con los datos del reloj; los valores exactos dependen de tu cuerpo. Las comidas puestas «a mano» no suman calorías.</p></section>`;
 }
 function hace(t) { const m = Math.max(0, Math.round((Date.now() - t) / 60000)); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; }
 function itemLog(l) {
@@ -314,10 +405,32 @@ function vistaSemana() {
   const prom = a => a.length ? Math.round(a.reduce((s, d) => s + d.p, 0) / a.length) : null;
   if (conE.length || sinE.length) h += `<p>Promedio en días de entreno: <b>${prom(conE) ?? '—'} g</b> · días de descanso: <b>${prom(sinE) ?? '—'} g</b></p>`;
   h += `<p class="muted">Agua: ${dias.map(d => d.agua).join(' · ')} vasos</p></section>`;
+  // déficit en días de entreno
+  const dE = dias.filter(d => d.ent.length);
+  h += `<section class="card"><h2>Déficit en días de entreno</h2>`;
+  if (!dE.length) h += `<p class="muted">Sin entrenos en los últimos 7 días.</p>`;
+  else if (!S.cfg.peso) h += `<p class="muted">Pon tu peso en Ajustes para calcularlo.</p>`;
+  else {
+    const filas = dE.map(d => {
+      const e = estadoEnergia(d.dk, d.dk === diaKey(Date.now()) ? Date.now() : d.t), xs = sesionesDe(d.dk), ch = chequeosEntreno(d.dk);
+      return { d, e, xs, post: ch.every(c => c.postOk) };
+    });
+    h += `<div class="tbl"><table><thead><tr><th>Día</th><th>Entreno</th><th>Comido / necesario</th><th>Post</th></tr></thead><tbody>
+      ${filas.map(f => `<tr><td>${new Date(f.d.t).toLocaleDateString('es-DO', { weekday: 'short', day: 'numeric' })}</td>
+        <td>${esc(f.xs.map(x => `${x.s.grupo} (${x.nivel})`).join(', '))}</td>
+        <td><span class="sem ${f.e.est}">${f.e.comido} / ${f.e.nec.total}</span></td><td>${f.post ? '✓' : '✗'}</td></tr>`).join('')}</tbody></table></div>`;
+    const malos = filas.filter(f => f.e.est === 'deficit' && f.d.dk !== diaKey(Date.now())).length, cerrados = filas.filter(f => f.d.dk !== diaKey(Date.now())).length;
+    if (cerrados) h += `<p>${malos ? `Comiste en <b>déficit ${malos} de ${cerrados}</b> días de entreno.` : 'Ningún día de entreno en déficit.'}
+      ${malos >= 2 ? ' Repetido, frena la recuperación y la ganancia de músculo: sube la comida de esos días, sobre todo antes y después de entrenar.' : ''}</p>`;
+  }
+  h += `</section>`;
   h += `<section class="card"><h2>Ajustes</h2>
     <label class="lbl">Tu peso (kg) <input id="peso" type="number" inputmode="decimal" min="30" max="250" step="0.1" value="${S.cfg.peso ?? ''}" placeholder="75"></label>
     <span class="lbl">Proteína por kg de peso</span><div class="chips">${[1.6, 1.8, 2.0, 2.2].map(f => `<button class="chip${S.cfg.factor === f ? ' sel' : ''}" data-act="factor" data-f="${f}" aria-pressed="${S.cfg.factor === f}">${fmtN(f)} g/kg</button>`).join('')}</div>
     <p class="muted peq">Para ganar músculo entrenando fuerte, lo habitual es entre 1,6 y 2,2 g por kg al día.</p>
+    <span class="lbl">Objetivo</span><div class="chips">${Object.keys(OBJ).map(k => `<button class="chip${S.cfg.objetivo === k ? ' sel' : ''}" data-act="objetivo" data-o="${k}" aria-pressed="${S.cfg.objetivo === k}">${OBJ[k].n}</button>`).join('')}</div>
+    <label class="lbl">Calorías de mantenimiento al día <input id="mant" type="number" inputmode="numeric" min="1000" max="6000" step="10" value="${S.cfg.mant ?? ''}" placeholder="${S.cfg.peso ? 'automático: ' + mantenimiento() : 'pon tu peso primero'}"></label>
+    <p class="muted peq">Si lo dejas vacío se usa peso × 31 kcal, típico de alguien activo. Si lo conoces mejor (por ejemplo, de una báscula o un nutricionista), escríbelo.</p>
     <label class="lbl">Meta de agua (vasos de 250 ml) <input id="aguaMeta" type="number" inputmode="numeric" min="1" max="24" step="1" value="${S.cfg.aguaMeta}"></label>
   </section>
   <section class="card"><h2>Respaldo</h2>
@@ -485,6 +598,7 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'factor': S.cfg.factor = +b.dataset.f; guardar(); render(); break;
+    case 'objetivo': S.cfg.objetivo = b.dataset.o; guardar(); render(); break;
     case 'exportar': entregar(`comida-${hoy}.json`, JSON.stringify({ app: 'comida', v: 1, exportado: new Date().toISOString(), cfg: S.cfg, logs: S.logs, agua: S.agua, plan: S.plan, mis: S.mis }, null, 1), 'application/json'); break;
     case 'importar': $('importInput').click(); break;
   }
@@ -501,6 +615,7 @@ document.addEventListener('change', async e => {
   if (a === 'slot') { S.plan[+el.dataset.d][+el.dataset.m] = el.value; guardar(); render(); }
   if (a === 'compra') { S.checked[el.dataset.k] = el.checked; guardar(); render(); }
   if (el.id === 'peso' || el.id === 'pesoRapido') { const v = parseFloat(String(el.value).replace(',', '.')); if (v >= 30 && v <= 250) { S.cfg.peso = v; guardar(); render(); aviso(`Meta: ${meta()} g de proteína al día.`); } }
+  if (el.id === 'mant') { const v = parseInt(el.value, 10); S.cfg.mant = v >= 1000 && v <= 6000 ? v : null; guardar(); render(); }
   if (el.id === 'aguaMeta') { const v = parseInt(el.value, 10); if (v >= 1 && v <= 24) { S.cfg.aguaMeta = v; guardar(); } }
   if (el.id === 'fotoInput' && el.files[0]) { try { fotoDraft = await reducir(el.files[0]); } catch (err) { aviso('No se pudo leer la foto.'); } el.value = ''; pintarFotoDraft(); }
   if (el.id === 'importInput' && el.files[0]) {

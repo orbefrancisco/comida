@@ -627,5 +627,12 @@ document.addEventListener('change', async e => {
 window.addEventListener('storage', ev => { if (ev.key === KEY_RELOJ && tab !== 'agregar') render(); });
 setInterval(() => { if (tab === 'hoy') render(); }, 60000);
 
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+// Copia sin conexión. Si llega una versión nueva, la app se recarga sola una vez para mostrarla.
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  const habia = !!navigator.serviceWorker.controller; let recargado = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (habia && !recargado) { recargado = true; location.reload(); } });
+  navigator.serviceWorker.register('sw.js').then(r => {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') r.update().catch(() => {}); });
+  }).catch(() => {});
+}
 render();

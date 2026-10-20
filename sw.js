@@ -1,6 +1,6 @@
 // Copia local de la app para que funcione sin internet.
 // Al cambiar cualquier archivo de la app, sube VERSION para que el celular descargue la nueva.
-const VERSION = 'comida-v4';
+const VERSION = 'comida-v5';
 const ARCHIVOS = ['./', './index.html', './app.js', './datos.js', './manifest.json', './icono-192.png', './icono-512.png', './icono-maskable-512.png'];
 
 self.addEventListener('install', e => {

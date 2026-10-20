@@ -39,7 +39,7 @@ const kcalDe = dk => logsDe(dk).reduce((a, l) => a + (l.k || 0), 0);
    MET de pesas = 3,5 + 2,5·I (Compendium: 3,5 ligero … 6 vigoroso); gasto neto = (MET − 1)·peso·horas.
    Necesidad del día = mantenimiento·(objetivo) + gasto neto de las sesiones. */
 const OBJ = { ganar: { f: 1.1, n: 'Ganar músculo (+10 %)' }, mantener: { f: 1, n: 'Mantener' }, bajar: { f: .85, n: 'Bajar grasa (−15 %)' } };
-const POST_GKG = .3, PRE_H = 4;
+const POST_GKG = .3, PRE_H = 4, JUNTAR_MIN = 60;   // sesiones a menos de 60 min entre sí = un mismo entrenamiento
 const mantenimiento = () => S.cfg.mant || (S.cfg.peso ? Math.round(S.cfg.peso * 31 / 10) * 10 : null);
 function analizarSesion(s) {
   const sets = s.sets || [];
@@ -59,6 +59,24 @@ function analizarSesion(s) {
     nivel: I < .4 ? 'suave' : I < .7 ? 'moderada' : 'fuerte' };
 }
 const sesionesDe = dk => sesionesReloj().filter(s => diaKey(Date.parse(s.start)) === dk).map(analizarSesion).sort((a, b) => a.t0 - b.t0);
+// El reloj guarda una sesión por grupo muscular; varias seguidas (huecos de menos de JUNTAR_MIN) forman un solo entrenamiento.
+function entrenamientosDe(dk) {
+  const out = [];
+  for (const x of sesionesDe(dk)) {
+    const u = out[out.length - 1];
+    if (u && x.t0 - u.fin <= JUNTAR_MIN * 60e3) u.partes.push(x);
+    else out.push({ partes: [x] });
+    const e = out[out.length - 1];
+    e.fin = Math.max(e.fin || 0, x.fin);
+  }
+  return out.map(e => {
+    const P = e.partes, dur = P.reduce((a, x) => a + x.dur, 0), I = P.reduce((a, x) => a + x.I*x.dur, 0)/dur;
+    const grupos = [...new Set(P.map(x => x.s.grupo))];
+    return { partes: P, t0: P[0].t0, fin: e.fin, dur, I, kcal: P.reduce((a, x) => a + x.kcal, 0),
+      series: P.reduce((a, x) => a + (+x.s.series || 0), 0), grupos,
+      nivel: I < .4 ? 'suave' : I < .7 ? 'moderada' : 'fuerte' };
+  });
+}
 function necesidad(dk) {
   const M = mantenimiento(); if (!M) return null;
   const ent = sesionesDe(dk).reduce((a, x) => a + x.kcal, 0);
@@ -75,7 +93,7 @@ function estadoEnergia(dk, ahora) {
 }
 function chequeosEntreno(dk) {
   const ls = logsDe(dk), peso = S.cfg.peso || 70;
-  return sesionesDe(dk).map(x => {
+  return entrenamientosDe(dk).map(x => {
     const antes = S.logs.filter(l => l.t <= x.t0).sort((a, b) => b.t - a.t)[0];
     const hAntes = antes ? (x.t0 - antes.t) / 3600e3 : null;
     const post = ls.filter(l => l.t >= x.t0 && l.t <= x.fin + VENTANA_POST_H * 3600e3).reduce((a, l) => a + l.p, 0);
@@ -282,8 +300,9 @@ function tarjetaCombustible(dk, hayEntreno) {
   if (!S.cfg.peso) return h + `<p class="muted">Pon tu peso arriba para calcular el gasto del entreno.</p></section>`;
   const ch = chequeosEntreno(dk), e = estadoEnergia(dk, Date.now()), p = protDe(dk), M = meta();
   ch.forEach(c => {
-    h += `<div class="sesion"><div class="fila"><b>${esc(c.x.s.grupo)} · ${hora(c.x.t0)}</b><span class="muted peq">${Math.round(c.x.dur / 60)} min · ${c.x.s.series} series</span></div>
-      <div class="fila"><span class="peq">Intensidad <b>${c.x.nivel}</b></span><span class="peq">≈ <b>${c.x.kcal} kcal</b> extra</span></div>${barra(c.x.I, 1)}</div>`;
+    const x = c.x, detalle = x.partes.length > 1 ? `<p class="muted peq">${x.partes.map(y => `${esc(y.s.grupo)} ${hora(y.t0)} (${Math.round(y.dur / 60)} min)`).join(' · ')}</p>` : '';
+    h += `<div class="sesion"><div class="fila"><b>${esc(x.grupos.join(' + '))} · ${hora(x.t0)}–${hora(x.fin)}</b><span class="muted peq">${Math.round(x.dur / 60)} min · ${x.series} series</span></div>
+      <div class="fila"><span class="peq">Intensidad <b>${x.nivel}</b></span><span class="peq">≈ <b>${x.kcal} kcal</b> extra</span></div>${barra(x.I, 1)}${detalle}</div>`;
   });
   h += `<div class="fila"><span>Energía de hoy</span><span class="sem ${e.est}">${ETQ_EST[e.est]}</span></div>
     ${barra(e.comido, e.nec.total)}
@@ -291,9 +310,10 @@ function tarjetaCombustible(dk, hayEntreno) {
       A esta hora lo esperable son unas ${e.esperado} kcal.</p>`;
   h += `<ul class="checks">`;
   ch.forEach(c => {
-    h += c.hAntes == null ? `<li class="mal">No hay comida anotada antes de entrenar ${esc(c.x.s.grupo.toLowerCase())}.</li>`
-      : `<li class="${c.pre ? 'bien' : 'mal'}">${c.pre ? `Comiste ${fmtN(r1(c.hAntes))} h antes de entrenar.` : `Llegaste al entreno con ${fmtN(r1(c.hAntes))} h sin comer (lo ideal es menos de ${PRE_H} h).`}</li>`;
-    h += `<li class="${c.postOk ? 'bien' : c.abierta ? 'pend' : 'mal'}">Proteína después del entreno: <b>${c.post} de ${c.postMeta} g</b>${c.postOk ? '.' : c.abierta ? ' · todavía estás a tiempo.' : ' · la ventana ya cerró.'}</li>`;
+    const quien = ch.length > 1 ? ` (entreno de las ${hora(c.x.t0)})` : '';
+    h += c.hAntes == null ? `<li class="mal">No hay comida anotada antes de entrenar${quien}.</li>`
+      : `<li class="${c.pre ? 'bien' : 'mal'}">${c.pre ? `Comiste ${fmtN(r1(c.hAntes))} h antes de entrenar${quien}.` : `Llegaste al entreno${quien} con ${fmtN(r1(c.hAntes))} h sin comer (lo ideal es menos de ${PRE_H} h).`}</li>`;
+    h += `<li class="${c.postOk ? 'bien' : c.abierta ? 'pend' : 'mal'}">Proteína después del entreno${quien}: <b>${c.post} de ${c.postMeta} g</b>${c.postOk ? '.' : c.abierta ? ' · todavía estás a tiempo.' : ' · la ventana ya cerró.'}</li>`;
   });
   if (M) h += `<li class="${p >= M ? 'bien' : 'pend'}">Proteína del día: ${Math.round(p)} de ${M} g.</li>`;
   h += `</ul>`;
@@ -394,7 +414,7 @@ function vistaPlan() {
 
 function vistaSemana() {
   const M = meta(), ses = sesionesReloj(), dias = [];
-  for (let i = 6; i >= 0; i--) { const t = Date.now() - i * 864e5, dk = diaKey(t); dias.push({ dk, t, p: protDe(dk), agua: S.agua[dk] || 0, ent: ses.filter(s => diaKey(Date.parse(s.start)) === dk).map(s => s.grupo) }); }
+  for (let i = 6; i >= 0; i--) { const t = Date.now() - i * 864e5, dk = diaKey(t); dias.push({ dk, t, p: protDe(dk), agua: S.agua[dk] || 0, ent: [...new Set(ses.filter(s => diaKey(Date.parse(s.start)) === dk).map(s => s.grupo))] }); }
   const tope = Math.max(M || 0, ...dias.map(d => d.p), 1);
   let h = `<section class="card"><h2>Proteína, últimos 7 días</h2><div class="grafica" role="img" aria-label="Proteína por día comparada con la meta">`;
   if (M) h += `<div class="meta" style="bottom:${(100 * M / tope).toFixed(1)}%"><span>meta ${M} g</span></div>`;
@@ -412,12 +432,12 @@ function vistaSemana() {
   else if (!S.cfg.peso) h += `<p class="muted">Pon tu peso en Ajustes para calcularlo.</p>`;
   else {
     const filas = dE.map(d => {
-      const e = estadoEnergia(d.dk, d.dk === diaKey(Date.now()) ? Date.now() : d.t), xs = sesionesDe(d.dk), ch = chequeosEntreno(d.dk);
+      const e = estadoEnergia(d.dk, d.dk === diaKey(Date.now()) ? Date.now() : d.t), xs = entrenamientosDe(d.dk), ch = chequeosEntreno(d.dk);
       return { d, e, xs, post: ch.every(c => c.postOk) };
     });
     h += `<div class="tbl"><table><thead><tr><th>Día</th><th>Entreno</th><th>Comido / necesario</th><th>Post</th></tr></thead><tbody>
       ${filas.map(f => `<tr><td>${new Date(f.d.t).toLocaleDateString('es-DO', { weekday: 'short', day: 'numeric' })}</td>
-        <td>${esc(f.xs.map(x => `${x.s.grupo} (${x.nivel})`).join(', '))}</td>
+        <td>${esc(f.xs.map(x => `${x.grupos.join(' + ')} (${x.nivel})`).join(', '))}</td>
         <td><span class="sem ${f.e.est}">${f.e.comido} / ${f.e.nec.total}</span></td><td>${f.post ? '✓' : '✗'}</td></tr>`).join('')}</tbody></table></div>`;
     const malos = filas.filter(f => f.e.est === 'deficit' && f.d.dk !== diaKey(Date.now())).length, cerrados = filas.filter(f => f.d.dk !== diaKey(Date.now())).length;
     if (cerrados) h += `<p>${malos ? `Comiste en <b>déficit ${malos} de ${cerrados}</b> días de entreno.` : 'Ningún día de entreno en déficit.'}

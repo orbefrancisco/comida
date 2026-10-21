@@ -27,7 +27,10 @@ function guardar() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch
 
 let tab = 'hoy', borrarPend = null, mostrarLista = false, draftExtra = [], draftOverride = {}, fotoDraft = null;
 
-const meta = () => S.cfg.peso ? Math.round(S.cfg.peso * S.cfg.factor) : null;
+// Día de entreno: la meta de proteína sube con las series efectivas del Reloj (+0,1 g/kg por cada 8, hasta +0,3, sin pasar de 2,2 g/kg).
+const efDia = dk => sesionesReloj().filter(s => diaKey(Date.parse(s.start)) === dk).reduce((a, s) => a + (+s.efectivas || 0), 0);
+const factorDia = dk => Math.max(S.cfg.factor, Math.min(2.2, S.cfg.factor + Math.min(.3, Math.round(efDia(dk) / 8) * .1)));
+const meta = dk => S.cfg.peso ? Math.round(S.cfg.peso * (dk ? factorDia(dk) : S.cfg.factor)) : null;
 const sesionesReloj = () => { try { return JSON.parse(localStorage.getItem(KEY_RELOJ) || '[]').filter(s => s && s.start); } catch (e) { return []; } };
 const logsDe = dk => S.logs.filter(l => diaKey(l.t) === dk).sort((a, b) => a.t - b.t);
 const protDe = dk => logsDe(dk).reduce((a, l) => a + (l.p || 0), 0);
@@ -271,14 +274,21 @@ function aviso(msg) { const el = $('aviso'); el.textContent = msg; el.hidden = f
 /* ---------- vistas ---------- */
 function barra(v, m) { const pc = m ? Math.min(100, 100 * v / m) : 0; return `<div class="track"><div class="fill" style="width:${pc.toFixed(1)}%"></div></div>`; }
 
+function extraEntreno(dk) {
+  const e = efDia(dk), f = factorDia(dk);
+  if (!e) return '';
+  const gr = [...new Set(sesionesReloj().filter(s => diaKey(Date.parse(s.start)) === dk).map(s => String(s.grupo).toLowerCase()))].join(' y ');
+  return `<p class="peq">Entrenaste ${esc(gr)}: <b>${fmtN(Math.round(e * 10) / 10)} series efectivas</b>. ${f > S.cfg.factor ? `La meta de hoy sube ${fmtN(Math.round((f - S.cfg.factor) * 10) / 10)} g por kg (+${Math.round((f - S.cfg.factor) * S.cfg.peso)} g).` : f >= 2.2 ? 'Tu meta ya está en el máximo útil (2,2 g por kg).' : 'Con este volumen tu meta normal alcanza.'}</p>`;
+}
+
 function vistaHoy() {
-  const hoy = diaKey(Date.now()), ls = logsDe(hoy), p = protDe(hoy), M = meta();
+  const hoy = diaKey(Date.now()), ls = logsDe(hoy), p = protDe(hoy), M = meta(hoy);
   const ses = sesionesReloj().filter(s => diaKey(Date.parse(s.start)) === hoy);
   const vasos = S.agua[hoy] || 0, vm = S.cfg.aguaMeta;
   const ultima = ls.length ? ls[ls.length - 1].t : null;
   let h = `<p class="fecha">${new Date().toLocaleDateString('es-DO', { weekday: 'long', day: 'numeric', month: 'long' })}</p>`;
   h += `<section class="card"><div class="fila"><h2>Proteína</h2><span class="grande">${Math.round(p)}<small> / ${M ?? '—'} g</small></span></div>${barra(p, M)}`;
-  h += M ? `<p class="muted">${p >= M ? 'Meta cumplida.' : `Te faltan <b>${Math.round(M - p)} g</b>.`} Meta: ${fmtN(S.cfg.factor)} g por kg × ${fmtN(S.cfg.peso)} kg.</p>`
+  h += M ? `<p class="muted">${p >= M ? 'Meta cumplida.' : `Te faltan <b>${Math.round(M - p)} g</b>.`} Meta: ${fmtN(factorDia(hoy))} g por kg × ${fmtN(S.cfg.peso)} kg.</p>${extraEntreno(hoy)}`
     : `<label class="inline">Tu peso (kg) para calcular la meta <input id="pesoRapido" type="number" inputmode="decimal" min="30" max="250" step="0.1" placeholder="75"></label>`;
   h += `</section>`;
   h += tarjetaCombustible(hoy, ses.length);
@@ -298,7 +308,7 @@ function tarjetaCombustible(dk, hayEntreno) {
   let h = `<section class="card"><h2>Combustible vs entreno</h2>`;
   if (!hayEntreno) return h + `<p class="muted">No hay entreno de hoy en el Reloj anómalo. Cuando entrenes, aquí verás si lo que comes alcanza para la intensidad de la sesión.</p></section>`;
   if (!S.cfg.peso) return h + `<p class="muted">Pon tu peso arriba para calcular el gasto del entreno.</p></section>`;
-  const ch = chequeosEntreno(dk), e = estadoEnergia(dk, Date.now()), p = protDe(dk), M = meta();
+  const ch = chequeosEntreno(dk), e = estadoEnergia(dk, Date.now()), p = protDe(dk), M = meta(dk);
   ch.forEach(c => {
     const x = c.x, detalle = x.partes.length > 1 ? `<p class="muted peq">${x.partes.map(y => `${esc(y.s.grupo)} ${hora(y.t0)} (${Math.round(y.dur / 60)} min)`).join(' · ')}</p>` : '';
     h += `<div class="sesion"><div class="fila"><b>${esc(x.grupos.join(' + '))} · ${hora(x.t0)}–${hora(x.fin)}</b><span class="muted peq">${Math.round(x.dur / 60)} min · ${x.series} series</span></div>
@@ -418,7 +428,7 @@ function vistaSemana() {
   const tope = Math.max(M || 0, ...dias.map(d => d.p), 1);
   let h = `<section class="card"><h2>Proteína, últimos 7 días</h2><div class="grafica" role="img" aria-label="Proteína por día comparada con la meta">`;
   if (M) h += `<div class="meta" style="bottom:${(100 * M / tope).toFixed(1)}%"><span>meta ${M} g</span></div>`;
-  dias.forEach(d => { h += `<div class="col"><span class="v">${Math.round(d.p)}</span><div class="b${M && d.p >= M ? ' ok' : ''}" style="height:${(100 * d.p / tope).toFixed(1)}%"></div></div>`; });
+  dias.forEach(d => { h += `<div class="col"><span class="v">${Math.round(d.p)}</span><div class="b${M && d.p >= meta(d.dk) ? ' ok' : ''}" style="height:${(100 * d.p / tope).toFixed(1)}%"></div></div>`; });
   h += `</div><div class="ejes">${dias.map(d => `<span>${new Date(d.t).toLocaleDateString('es-DO', { weekday: 'short' }).slice(0, 3)}<i class="${d.ent.length ? 'ent' : ''}" title="${esc(d.ent.join(', '))}"></i></span>`).join('')}</div>
     <p class="muted peq"><i class="ent leyenda"></i> día con entreno en el Reloj anómalo</p>`;
   const conE = dias.filter(d => d.ent.length && d.p), sinE = dias.filter(d => !d.ent.length && d.p);

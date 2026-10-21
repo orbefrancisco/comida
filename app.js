@@ -28,18 +28,121 @@ function nuevo() {
     pesos: {}, favs: [], sup: supInicial(), precios: {} };
 }
 const esObj = x => x && typeof x === 'object' && !Array.isArray(x);
-let S;
-try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
-if (!S || !Array.isArray(S.logs)) S = nuevo();
-S = Object.assign(nuevo(), S, { cfg: Object.assign(nuevo().cfg, S.cfg || {}) });
-// Migración de estados viejos (sin pesos, favoritas, suplementos, precios ni recordatorios).
-S.cfg.rec = Object.assign(recInicial(), esObj(S.cfg.rec) ? S.cfg.rec : {});
-if (!esObj(S.cfg.rec.horas)) S.cfg.rec.horas = {};
-if (!esObj(S.pesos)) S.pesos = {};
-if (!Array.isArray(S.favs)) S.favs = [];
-if (!esObj(S.sup) || !Array.isArray(S.sup.items)) S.sup = supInicial();
-if (!esObj(S.sup.hecho)) S.sup.hecho = {};
-if (!esObj(S.precios)) S.precios = {};
+
+/* ---------- validación de lo que se LEE (almacenamiento compartido del origen y archivos importados) ----------
+   El localStorage lo comparten todas las apps de orbefrancisco.github.io (Reloj anómalo, Vibra…) y un respaldo
+   importado puede venir manipulado. Por eso cada campo se normaliza al leerlo: números finitos y acotados, textos
+   recortados, listas con tope, fechas válidas. Lo que no encaja se descarta y se cuenta (desc.n). Además, todo texto
+   se escapa con esc() al ponerlo en HTML. Nada de lo leído se ejecuta nunca. */
+const TXT_MAX = 200, MAX_LOGS = 50000, MAX_ITEMS = 60, MAX_MIS = 2000, MAX_FAVS = 500, MAX_SUP = 50;
+const DIA_RE = /^\d{4}-\d\d-\d\d$/, HORA_RE = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d+)?)?$/;
+const T_MIN = 946684800000, T_MAX = 4102444800000;   // 2000-01-01 … 2100-01-01
+// número finito en [lo, hi] (acepta "12,5" o "12.5" escritos como texto); si no, null
+const numEn = (x, lo, hi) => { const v = typeof x === 'string' && x.trim() !== '' ? Number(x.trim().replace(',', '.')) : x; return typeof v === 'number' && isFinite(v) && v >= lo && v <= hi ? v : null; };
+const entEn = (x, lo, hi) => { const v = numEn(x, lo, hi); return v != null && Number.isInteger(v) ? v : null; };
+const txtDe = (x, max = TXT_MAX) => typeof x === 'string' ? x.slice(0, max) : typeof x === 'number' && isFinite(x) ? String(x) : null;
+const nuevoDesc = () => ({ n: 0 });
+// Objeto {clave: valor} con claves que cumplen la expresión y valores que pasan f (null = se descarta).
+function mapaDe(o, reClave, f, desc, max = 5000) {
+  const out = {}; if (!esObj(o)) { if (o != null) desc.n++; return out; }
+  let i = 0;
+  for (const k of Object.keys(o)) {
+    if (i >= max || k.length > TXT_MAX || !reClave.test(k)) { desc.n++; continue; }
+    const v = f(o[k]); if (v == null) { desc.n++; continue; } out[k] = v; i++;
+  }
+  return out;
+}
+function itemDeDatos(i, desc) {
+  if (!esObj(i)) { desc.n++; return null; }
+  const n = txtDe(i.n); if (n == null) { desc.n++; return null; }
+  const o = { n, c: txtDe(i.c) ?? '', g: numEn(i.g, 0, 1e5) ?? 0, p: numEn(i.p, 0, 5000) ?? 0, k: numEn(i.k, 0, 1e5) ?? 0 };
+  const id = txtDe(i.id); if (id) o.id = id;
+  return o;
+}
+const itemsDe = (a, desc) => { if (!Array.isArray(a)) { if (a != null) desc.n++; return []; } if (a.length > MAX_ITEMS) desc.n += a.length - MAX_ITEMS; return a.slice(0, MAX_ITEMS).map(i => itemDeDatos(i, desc)).filter(Boolean); };
+function logDe(l, desc, j) {
+  const t = numEn(l && l.t, T_MIN, T_MAX); if (!esObj(l) || t == null) { desc.n++; return null; }
+  const items = itemsDe(l.items, desc);
+  const o = { id: txtDe(l.id) || 'c' + t + '-' + j, t, comida: ETIQ[l.comida] && Object.prototype.hasOwnProperty.call(ETIQ, l.comida) ? l.comida : comidaPorHora(t), items,
+    p: numEn(l.p, 0, 5000) ?? r1(items.reduce((a, i) => a + i.p, 0)), k: numEn(l.k, 0, 1e5) ?? items.reduce((a, i) => a + i.k, 0), foto: l.foto === true };
+  for (const c of ['src', 'plan']) { const v = txtDe(l[c]); if (v != null) o[c] = v; }
+  return o;
+}
+function logsDeDatos(a, desc) {
+  if (!Array.isArray(a)) { if (a != null) desc.n++; return []; }
+  if (a.length > MAX_LOGS) desc.n += a.length - MAX_LOGS;
+  return a.slice(0, MAX_LOGS).map((l, j) => logDe(l, desc, j)).filter(Boolean);
+}
+function misDe(a, desc) {
+  if (!Array.isArray(a)) { if (a != null) desc.n++; return []; }
+  if (a.length > MAX_MIS) desc.n += a.length - MAX_MIS;
+  return a.slice(0, MAX_MIS).map(f => {
+    const id = esObj(f) && txtDe(f.id), n = esObj(f) && txtDe(f.n); if (!id || !n) { desc.n++; return null; }
+    const u = mapaDe(f.u, /^[a-z_]{1,30}$/, v => numEn(v, .01, 1e4), desc, 30);
+    let d = typeof f.d === 'string' && u[f.d] != null && UNIDADES[f.d] ? f.d : Object.keys(u).find(k => UNIDADES[k]);
+    if (!d) { u.porcion = u.porcion || 100; d = 'porcion'; }
+    const al = (Array.isArray(f.a) ? f.a : []).slice(0, 50).map(x => txtDe(x)).filter(Boolean);
+    const o = { id, n, a: al.length ? al : [norm(n)], p: numEn(f.p, 0, 1000) ?? 0, k: numEn(f.k, 0, 1e4) ?? 0, u, d };
+    const code = txtDe(f.code, 40); if (code) o.code = code.replace(/\D/g, '');
+    return o;
+  }).filter(Boolean);
+}
+function favsDe(a, desc) {
+  if (!Array.isArray(a)) { if (a != null) desc.n++; return []; }
+  if (a.length > MAX_FAVS) desc.n += a.length - MAX_FAVS;
+  return a.slice(0, MAX_FAVS).map(f => {
+    const sig = esObj(f) && txtDe(f.sig, 5000); if (!sig) { desc.n++; return null; }
+    const items = itemsDe(f.items, desc);
+    return { id: txtDe(f.id) || 'f' + sig.length + Math.random().toString(36).slice(2, 7), sig, n: txtDe(f.n, 2000) ?? '', comida: Object.prototype.hasOwnProperty.call(ETIQ, f.comida) ? f.comida : 'almuerzo', items,
+      p: numEn(f.p, 0, 5000) ?? r1(items.reduce((s, i) => s + i.p, 0)), k: numEn(f.k, 0, 1e5) ?? items.reduce((s, i) => s + i.k, 0) };
+  }).filter(Boolean);
+}
+function supItemsDe(a, desc) {
+  if (!Array.isArray(a)) { desc.n++; return null; }
+  if (a.length > MAX_SUP) desc.n += a.length - MAX_SUP;
+  return a.slice(0, MAX_SUP).map(it => {
+    const id = esObj(it) && txtDe(it.id); if (!id) { desc.n++; return null; }
+    const o = { id, n: txtDe(it.n) ?? id, dosis: txtDe(it.dosis) ?? '', activo: it.activo !== false };
+    for (const [c, lo, hi] of [['gScoop', 0, 200], ['kScoop', 0, 2000], ['scoops', .5, 20]]) { const v = numEn(it[c], lo, hi); if (v != null) o[c] = v; else if (it[c] != null) desc.n++; }
+    return o;
+  }).filter(Boolean);
+}
+const hechoDe = (o, desc) => mapaDe(o, DIA_RE, d => esObj(d) ? mapaDe(d, /^[^]{1,200}$/, v => v === true ? true : txtDe(v), desc, MAX_SUP) : null, desc);
+const preciosDe = (o, desc) => mapaDe(o, /^(ing|ali):[\w.:-]{1,120}$/, v => numEn(v, 0, 1e7), desc);
+const pesosDe = (o, desc) => mapaDe(o, DIA_RE, v => numEn(v, 20, 400), desc);
+const aguaDe = (o, desc) => mapaDe(o, DIA_RE, v => { const x = numEn(v, 0, 100); return x == null ? null : Math.round(x); }, desc);
+function planDe(p, desc) {
+  if (!Array.isArray(p) || p.length !== 7) { if (p != null) desc.n++; return PLAN_INICIAL.map(d => d.slice()); }
+  return p.map((d, i) => Array.isArray(d) ? COMIDAS.map((_, m) => txtDe(d[m]) ?? '') : (desc.n++, PLAN_INICIAL[i].slice()));
+}
+function recDe(r, desc) {
+  const R = recInicial(); if (!esObj(r)) { if (r != null) desc.n++; return R; }
+  if (typeof r.agua === 'boolean') R.agua = r.agua; if (typeof r.post === 'boolean') R.post = r.post;
+  R.aguaCada = numEn(r.aguaCada, .5, 12) ?? R.aguaCada; R.desde = entEn(r.desde, 0, 23) ?? R.desde; R.hasta = entEn(r.hasta, 1, 24) ?? R.hasta;
+  if (typeof r.creatinaHora === 'string' && HORA_RE.test(r.creatinaHora)) R.creatinaHora = r.creatinaHora;
+  R.horas = mapaDe(r.horas, /^(desayuno|almuerzo|merienda|cena)$/, v => v === '' || (typeof v === 'string' && HORA_RE.test(v)) ? v : null, desc);
+  return R;
+}
+function cfgDe(c, desc) {
+  const C = nuevo().cfg; if (!esObj(c)) { if (c != null) desc.n++; return C; }
+  C.peso = numEn(c.peso, 20, 400); C.factor = numEn(c.factor, 1, 3) ?? C.factor; C.aguaMeta = entEn(c.aguaMeta, 1, 24) ?? C.aguaMeta;
+  C.mant = entEn(c.mant, 1000, 6000); C.objetivo = Object.prototype.hasOwnProperty.call(OBJ, c.objetivo) ? c.objetivo : 'mantener';
+  const aj = numEn(c.ajusteT, T_MIN, T_MAX); if (aj != null) C.ajusteT = aj;
+  C.rec = recDe(c.rec, desc);
+  return C;
+}
+// Estado completo de Comida (clave 'comida-v1'); los estados viejos sin campos nuevos se completan con los valores de inicio.
+function estadoDe(o, desc) {
+  const N = nuevo(); if (!esObj(o) || !Array.isArray(o.logs)) { if (o != null) desc.n++; return N; }
+  const sup = esObj(o.sup) ? supItemsDe(o.sup.items, desc) : null;
+  const E = { cfg: cfgDe(o.cfg, desc), logs: logsDeDatos(o.logs, desc), agua: aguaDe(o.agua, desc), plan: planDe(o.plan, desc),
+    checked: mapaDe(o.checked, /^[^]{1,200}$/, v => typeof v === 'boolean' ? v : null, desc), mis: misDe(o.mis, desc),
+    pesos: pesosDe(o.pesos, desc), favs: favsDe(o.favs, desc),
+    sup: sup ? { items: sup, hecho: hechoDe(o.sup.hecho, desc) } : supInicial(), precios: preciosDe(o.precios, desc) };
+  const at = numEn(o.aguaT, T_MIN, T_MAX); if (at != null) E.aguaT = at;
+  return E;
+}
+let S;   // se carga (y se valida) más abajo, cuando ya están definidas OBJ y las demás tablas
 function guardar() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { aviso('No se pudo guardar en este dispositivo.'); } }
 
 let tab = 'hoy', borrarPend = null, mostrarLista = false, draftExtra = [], draftOverride = {}, fotoDraft = null;
@@ -49,7 +152,16 @@ let mostrarPrecios = false, rangoPeso = 30, editarBien = false, sugCache = [];
 const efDia = dk => sesionesReloj().filter(s => diaKey(Date.parse(s.start)) === dk).reduce((a, s) => a + (+s.efectivas || 0), 0);
 const factorDia = dk => Math.max(S.cfg.factor, Math.min(2.2, S.cfg.factor + Math.min(.3, Math.round(efDia(dk) / 8) * .1)));
 const meta = dk => S.cfg.peso ? Math.round(S.cfg.peso * (dk ? factorDia(dk) : S.cfg.factor)) : null;
-const sesionesReloj = () => { try { return JSON.parse(localStorage.getItem(KEY_RELOJ) || '[]').filter(s => s && s.start); } catch (e) { return []; } };
+// Sesiones del Reloj anómalo (clave compartida): solo los campos que usa Comida, ya validados.
+function sesionRelojDe(s) {
+  if (!esObj(s) || typeof s.start !== 'string' || s.start.length > 40) return null;
+  const t = Date.parse(s.start); if (!(t >= T_MIN && t <= T_MAX)) return null;
+  const sets = (Array.isArray(s.sets) ? s.sets.slice(0, 2000) : []).filter(esObj).map(r => ({
+    reps: txtDe(r.reps, 20) ?? '', rir: txtDe(r.rir, 10) ?? '', rest: numEn(r.rest, 0, 3600) ?? 0, P: numEn(r.P, 0, 10) }));
+  return { start: s.start, grupo: txtDe(s.grupo) ?? '', efectivas: numEn(s.efectivas, 0, 1000) ?? 0, series: numEn(s.series, 0, 1000) ?? 0,
+    tuc: numEn(s.tuc, 0, 1e6) ?? 0, sets };
+}
+const sesionesReloj = () => { try { const a = JSON.parse(localStorage.getItem(KEY_RELOJ) || '[]'); return Array.isArray(a) ? a.map(sesionRelojDe).filter(Boolean) : []; } catch (e) { return []; } };
 const logsDe = dk => S.logs.filter(l => diaKey(l.t) === dk).sort((a, b) => a.t - b.t);
 const protDe = dk => logsDe(dk).reduce((a, l) => a + (l.p || 0), 0);
 const kcalDe = dk => logsDe(dk).reduce((a, l) => a + (l.k || 0), 0);
@@ -61,6 +173,9 @@ const kcalDe = dk => logsDe(dk).reduce((a, l) => a + (l.k || 0), 0);
    Necesidad del día = mantenimiento·(objetivo) + gasto neto de las sesiones. */
 const OBJ = { ganar: { f: 1.1, n: 'Ganar músculo (+10 %)' }, mantener: { f: 1, n: 'Mantener' }, bajar: { f: .85, n: 'Bajar grasa (−15 %)' } };
 const POST_GKG = .3, PRE_H = 4, JUNTAR_MIN = 60;   // sesiones a menos de 60 min entre sí = un mismo entrenamiento
+const descCarga = nuevoDesc();
+try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
+S = estadoDe(S, descCarga);
 const mantenimiento = () => S.cfg.mant || (S.cfg.peso ? Math.round(S.cfg.peso * 31 / 10) * 10 : null);
 function analizarSesion(s) {
   const sets = s.sets || [];
@@ -509,7 +624,10 @@ function marcarSup(id) {
    Sin dato de sueño no se da nota (es el componente principal): se piden las horas.
    Semáforo: ≥ 75 verde, 50–74 ámbar, < 50 rojo. La frase explica el componente que más puntos quita. */
 const KEY_BIEN = 'bienestar-diario';
-const leerBien = () => { try { const o = JSON.parse(localStorage.getItem(KEY_BIEN) || '{}'); return esObj(o) ? o : {}; } catch (e) { return {}; } };
+// Validado al leer: sueño = horas (número finito 0–14), energía = entero 1–5; lo demás se descarta.
+const bienDiaDe = b => { if (!esObj(b)) return null; const o = {}, su = numEn(b.sueno, 0, 14), en = entEn(b.energia, 1, 5), t = numEn(b.t, 0, T_MAX);
+  if (su != null) o.sueno = su; if (en != null) o.energia = en; if (o.sueno == null && o.energia == null) return null; if (t != null) o.t = t; return o; };
+const leerBien = () => { try { const o = JSON.parse(localStorage.getItem(KEY_BIEN) || '{}'); return esObj(o) ? mapaDe(o, DIA_RE, bienDiaDe, nuevoDesc(), 20000) : {}; } catch (e) { return {}; } };
 function anotarBien(campo, v) {
   const o = leerBien(), hoy = diaKey(Date.now());
   o[hoy] = Object.assign(esObj(o[hoy]) ? o[hoy] : {}, { [campo]: v, t: Date.now() });
@@ -542,12 +660,13 @@ function recuperacion(ahora) {
 function consejoRecup(r) {
   const p = r.peor;
   if (!p || p.pierde < 4) return 'Todo en orden: buen día para entrenar fuerte.';
+  const v = esc(p.v);   // el resultado va a innerHTML
   return {
-    sueno: `Lo que más te baja la nota es el sueño (${p.v}): si entrenas, quita una serie por ejercicio y esta noche acuéstate más temprano.`,
-    energia: `Tu energía está baja (${p.v}): calienta bien, come algo con carbohidrato antes y no busques récords hoy.`,
-    entreno: `Vienes con mucha carga (${p.v}): hoy trabaja otro grupo muscular o descansa.`,
-    comida: `Ayer te quedaste corto de comida (${p.v}): hoy adelanta la proteína y no te saltes comidas.`,
-    agua: `Ayer tomaste poca agua (${p.v}): empieza hoy con dos vasos.`
+    sueno: `Lo que más te baja la nota es el sueño (${v}): si entrenas, quita una serie por ejercicio y esta noche acuéstate más temprano.`,
+    energia: `Tu energía está baja (${v}): calienta bien, come algo con carbohidrato antes y no busques récords hoy.`,
+    entreno: `Vienes con mucha carga (${v}): hoy trabaja otro grupo muscular o descansa.`,
+    comida: `Ayer te quedaste corto de comida (${v}): hoy adelanta la proteína y no te saltes comidas.`,
+    agua: `Ayer tomaste poca agua (${v}): empieza hoy con dos vasos.`
   }[p.k];
 }
 
@@ -678,7 +797,7 @@ function tarjetaPeso() {
   const hoy = diaKey(Date.now()), ks = diasPeso(), yaHoy = S.pesos[hoy] != null, s = seriePeso(), a = ajusteCalorias();
   const ult = ks.length ? +S.pesos[ks[ks.length - 1]] : S.cfg.peso;
   let h = `<section class="card"><div class="fila"><h2>Peso</h2>${s.length ? `<span class="grande">${fmt2(s[s.length - 1].tr)}<small> kg tendencia</small></span>` : ''}</div>
-    <div class="dos"><label class="lbl">${yaHoy ? 'Peso de hoy (guardado)' : 'Peso de esta mañana (kg)'}<input id="pesoHoy" type="number" inputmode="decimal" min="30" max="250" step="0.1" value="${ult ?? ''}" placeholder="75"></label>
+    <div class="dos"><label class="lbl">${yaHoy ? 'Peso de hoy (guardado)' : 'Peso de esta mañana (kg)'}<input id="pesoHoy" type="number" inputmode="decimal" min="30" max="250" step="0.1" value="${esc(ult ?? '')}" placeholder="75"></label>
     <button class="${yaHoy ? '' : 'prim'}" data-act="guardarPeso">${yaHoy ? 'Corregir' : 'Guardar'}</button></div>`;
   if (a) h += `<p class="peq">${fraseAjuste(a)}</p>`;
   else if (ks.length) h += `<p class="muted peq">Pésate cada mañana, en ayunas y después del baño. Con 14 días de datos (llevas ${ks.length} ${ks.length === 1 ? 'pesada' : 'pesadas'}) verás tu ritmo semanal y cuánto ajustar las calorías.</p>`;
@@ -706,13 +825,13 @@ function tarjetaCombustible(dk, hayEntreno) {
   const ch = chequeosEntreno(dk), e = estadoEnergia(dk, Date.now()), p = protDe(dk), M = meta(dk);
   ch.forEach(c => {
     const x = c.x, detalle = x.partes.length > 1 ? `<p class="muted peq">${x.partes.map(y => `${esc(y.s.grupo)} ${hora(y.t0)} (${Math.round(y.dur / 60)} min)`).join(' · ')}</p>` : '';
-    h += `<div class="sesion"><div class="fila"><b>${esc(x.grupos.join(' + '))} · ${hora(x.t0)}–${hora(x.fin)}</b><span class="muted peq">${Math.round(x.dur / 60)} min · ${x.series} series</span></div>
-      <div class="fila"><span class="peq">Intensidad <b>${x.nivel}</b></span><span class="peq">≈ <b>${x.kcal} kcal</b> extra</span></div>${barra(x.I, 1)}${detalle}</div>`;
+    h += `<div class="sesion"><div class="fila"><b>${esc(x.grupos.join(' + '))} · ${hora(x.t0)}–${hora(x.fin)}</b><span class="muted peq">${Math.round(x.dur / 60)} min · ${esc(x.series)} series</span></div>
+      <div class="fila"><span class="peq">Intensidad <b>${esc(x.nivel)}</b></span><span class="peq">≈ <b>${esc(x.kcal)} kcal</b> extra</span></div>${barra(x.I, 1)}${detalle}</div>`;
   });
   h += `<div class="fila"><span>Energía de hoy</span><span class="sem ${e.est}">${ETQ_EST[e.est]}</span></div>
     ${barra(e.comido, e.nec.total)}
-    <p class="peq">Comiste <b>${e.comido} kcal</b> de <b>${e.nec.total}</b> (mantenimiento ${e.nec.base} + entreno ${e.nec.ent}).
-      A esta hora lo esperable son unas ${e.esperado} kcal.</p>`;
+    <p class="peq">Comiste <b>${esc(e.comido)} kcal</b> de <b>${esc(e.nec.total)}</b> (mantenimiento ${esc(e.nec.base)} + entreno ${esc(e.nec.ent)}).
+      A esta hora lo esperable son unas ${esc(e.esperado)} kcal.</p>`;
   h += `<ul class="checks">`;
   ch.forEach(c => {
     const quien = ch.length > 1 ? ` (entreno de las ${hora(c.x.t0)})` : '';
@@ -763,7 +882,7 @@ function vistaAgregar() {
   <section class="card" id="codigoCaja" hidden></section>`;
   // Favoritas: se anotan con un toque a la hora actual.
   h += `<section class="card" id="favCaja"><h2>★ Favoritas</h2>`;
-  h += S.favs.length ? `<ul class="lista-r">${S.favs.map(f => `<li><div class="cuerpo"><span>${esc(f.n)}</span><span class="muted peq">${Math.round(f.p)} g de proteína · ${f.k} kcal</span></div>
+  h += S.favs.length ? `<ul class="lista-r">${S.favs.map(f => `<li><div class="cuerpo"><span>${esc(f.n)}</span><span class="muted peq">${Math.round(f.p)} g de proteína · ${esc(f.k)} kcal</span></div>
       <button class="prim" data-act="usarFav" data-id="${esc(f.id)}">Anotar</button><button class="x" data-act="quitarFav" data-id="${esc(f.id)}" aria-label="Quitar de favoritas">×</button></li>`).join('')}</ul>`
     : `<p class="muted peq">Aún no tienes favoritas. En <b>Hoy</b>, toca la ☆ junto a una comida para guardarla aquí.</p>`;
   h += `</section>`;
@@ -791,7 +910,7 @@ function pintarPrevia() {
       <span class="prot">${fmtN(x.p)} g</span><button class="x" data-act="quitar" data-i="${i}" aria-label="Quitar">×</button></li>`
     : `<li class="nr"><div class="cuerpo"><span>No reconocí «${esc(x.txt)}»</span>
       <select data-act="elegir" data-i="${i}" aria-label="Elegir alimento"><option value="">Elegir de la lista…</option>${opts}</select>
-      <label class="peq">o proteína a mano (g) <input type="number" inputmode="decimal" min="0" step="1" data-act="pman" data-i="${i}" value="${x.pManual ?? ''}"></label></div>
+      <label class="peq">o proteína a mano (g) <input type="number" inputmode="decimal" min="0" step="1" data-act="pman" data-i="${i}" value="${esc(x.pManual ?? '')}"></label></div>
       <button class="x" data-act="quitar" data-i="${i}" aria-label="Quitar">×</button></li>`).join('')}</ul>
     <p class="total">Total: <b>${fmtN(tot)} g de proteína</b> · ${it.reduce((a, x) => a + (x.k || 0), 0)} kcal</p>`;
 }
@@ -838,7 +957,7 @@ function vistaPlan() {
   h += `<section class="card"><div class="fila"><h2>Precios (RD$)</h2><button data-act="precios">${mostrarPrecios ? 'Ocultar' : 'Editar'}</button></div>`;
   if (mostrarPrecios) {
     const fila = (k, nom, unidad, def) => `<li data-nom="${esc(norm(nom))}"><span>${esc(nom)}<small class="muted"> ${esc(unidad)}</small></span>
-      <input type="number" inputmode="decimal" min="0" step="1" data-act="precio" data-k="${k}" value="${S.precios[k] ?? ''}" placeholder="${def ?? '—'}" aria-label="Precio de ${esc(nom)} ${esc(unidad)}"></li>`;
+      <input type="number" inputmode="decimal" min="0" step="1" data-act="precio" data-k="${esc(k)}" value="${esc(S.precios[k] ?? '')}" placeholder="${esc(def ?? '—')}" aria-label="Precio de ${esc(nom)} ${esc(unidad)}"></li>`;
     h += `<p class="peq">Los números grises son <b>aproximados, no oficiales</b>: escribe encima lo que pagas tú. Si borras tu precio, vuelve el aproximado.</p>
       <input id="precioBuscar" type="search" placeholder="Buscar alimento…" aria-label="Buscar alimento">
       <h3 class="cat">Ingredientes del plan</h3><ul class="precios">${Object.keys(ING).sort((a, b) => ING[a][0].localeCompare(ING[b][0], 'es')).map(k => fila('ing:' + k, ING[k][0], 'por ' + UNID_ING[ING[k][2]], PRECIO_ING[k])).join('')}</ul>
@@ -860,7 +979,7 @@ function vistaSemana() {
   const conE = dias.filter(d => d.ent.length && d.p), sinE = dias.filter(d => !d.ent.length && d.p);
   const prom = a => a.length ? Math.round(a.reduce((s, d) => s + d.p, 0) / a.length) : null;
   if (conE.length || sinE.length) h += `<p>Promedio en días de entreno: <b>${prom(conE) ?? '—'} g</b> · días de descanso: <b>${prom(sinE) ?? '—'} g</b></p>`;
-  h += `<p class="muted">Agua: ${dias.map(d => d.agua).join(' · ')} vasos</p></section>`;
+  h += `<p class="muted">Agua: ${esc(dias.map(d => d.agua).join(' · '))} vasos</p></section>`;
   // déficit en días de entreno
   const dE = dias.filter(d => d.ent.length);
   h += `<section class="card"><h2>Déficit en días de entreno</h2>`;
@@ -874,20 +993,20 @@ function vistaSemana() {
     h += `<div class="tbl"><table><thead><tr><th>Día</th><th>Entreno</th><th>Comido / necesario</th><th>Post</th></tr></thead><tbody>
       ${filas.map(f => `<tr><td>${new Date(f.d.t).toLocaleDateString('es-DO', { weekday: 'short', day: 'numeric' })}</td>
         <td>${esc(f.xs.map(x => `${x.grupos.join(' + ')} (${x.nivel})`).join(', '))}</td>
-        <td><span class="sem ${f.e.est}">${f.e.comido} / ${f.e.nec.total}</span></td><td>${f.post ? '✓' : '✗'}</td></tr>`).join('')}</tbody></table></div>`;
+        <td><span class="sem ${f.e.est}">${esc(f.e.comido)} / ${esc(f.e.nec.total)}</span></td><td>${f.post ? '✓' : '✗'}</td></tr>`).join('')}</tbody></table></div>`;
     const malos = filas.filter(f => f.e.est === 'deficit' && f.d.dk !== diaKey(Date.now())).length, cerrados = filas.filter(f => f.d.dk !== diaKey(Date.now())).length;
     if (cerrados) h += `<p>${malos ? `Comiste en <b>déficit ${malos} de ${cerrados}</b> días de entreno.` : 'Ningún día de entreno en déficit.'}
       ${malos >= 2 ? ' Repetido, frena la recuperación y la ganancia de músculo: sube la comida de esos días, sobre todo antes y después de entrenar.' : ''}</p>`;
   }
   h += `</section>`;
   h += `<section class="card"><h2>Ajustes</h2>
-    <label class="lbl">Tu peso (kg) · se actualiza solo con tu última pesada de Hoy <input id="peso" type="number" inputmode="decimal" min="30" max="250" step="0.1" value="${S.cfg.peso ?? ''}" placeholder="75"></label>
+    <label class="lbl">Tu peso (kg) · se actualiza solo con tu última pesada de Hoy <input id="peso" type="number" inputmode="decimal" min="30" max="250" step="0.1" value="${esc(S.cfg.peso ?? '')}" placeholder="75"></label>
     <span class="lbl">Proteína por kg de peso</span><div class="chips">${[1.6, 1.8, 2.0, 2.2].map(f => `<button class="chip${S.cfg.factor === f ? ' sel' : ''}" data-act="factor" data-f="${f}" aria-pressed="${S.cfg.factor === f}">${fmtN(f)} g/kg</button>`).join('')}</div>
     <p class="muted peq">Para ganar músculo entrenando fuerte, lo habitual es entre 1,6 y 2,2 g por kg al día.</p>
     <span class="lbl">Objetivo</span><div class="chips">${Object.keys(OBJ).map(k => `<button class="chip${S.cfg.objetivo === k ? ' sel' : ''}" data-act="objetivo" data-o="${k}" aria-pressed="${S.cfg.objetivo === k}">${OBJ[k].n}</button>`).join('')}</div>
-    <label class="lbl">Calorías de mantenimiento al día <input id="mant" type="number" inputmode="numeric" min="1000" max="6000" step="10" value="${S.cfg.mant ?? ''}" placeholder="${S.cfg.peso ? 'automático: ' + mantenimiento() : 'pon tu peso primero'}"></label>
+    <label class="lbl">Calorías de mantenimiento al día <input id="mant" type="number" inputmode="numeric" min="1000" max="6000" step="10" value="${esc(S.cfg.mant ?? '')}" placeholder="${esc(S.cfg.peso ? 'automático: ' + mantenimiento() : 'pon tu peso primero')}"></label>
     <p class="muted peq">Si lo dejas vacío se usa peso × 31 kcal, típico de alguien activo. Si lo conoces mejor (por ejemplo, de una báscula o un nutricionista), escríbelo.</p>
-    <label class="lbl">Meta de agua (vasos de 250 ml) <input id="aguaMeta" type="number" inputmode="numeric" min="1" max="24" step="1" value="${S.cfg.aguaMeta}"></label>
+    <label class="lbl">Meta de agua (vasos de 250 ml) <input id="aguaMeta" type="number" inputmode="numeric" min="1" max="24" step="1" value="${esc(S.cfg.aguaMeta)}"></label>
   </section>${tarjetaRecordatorios()}${tarjetaConfigSup()}
   <section class="card"><h2>Respaldo</h2>
     <div class="acc"><button class="prim" data-act="exportar">Exportar datos</button><button data-act="importar">Importar datos</button></div>
@@ -920,7 +1039,7 @@ function tarjetaRecordatorios() {
       <label class="lbl">Hasta<select id="recHasta">${[18, 19, 20, 21, 22].map(v => opt(v, R.hasta, v + ':00')).join('')}</select></label></div>
     <label class="check"><input type="checkbox" id="recPost"${R.post ? ' checked' : ''}> Proteína después del entreno (si hay sesión del reloj hoy y no llegas a la meta post)</label>
     <span class="lbl">Horas de las comidas (sacadas de lo que sueles anotar; cámbialas si quieres)</span>
-    <div class="tres">${COMIDAS.map(([c, lab]) => `<label class="lbl">${lab}<input type="time" data-act="horaCom" data-c="${c}" value="${horaComida(c)}"></label>`).join('')}</div>
+    <div class="tres">${COMIDAS.map(([c, lab]) => `<label class="lbl">${lab}<input type="time" data-act="horaCom" data-c="${c}" value="${esc(horaComida(c))}"></label>`).join('')}</div>
     ${S.sup.items.some(x => x.id === 'creatina' && x.activo) ? `<label class="lbl">Hora de la creatina<input type="time" id="recCreat" value="${esc(R.creatinaHora)}"></label>` : ''}
     <h3 class="cat">Con la app abierta</h3>
     <p class="peq">${!hay ? 'Este navegador no permite avisos: los verás como mensaje dentro de la app.' : perm === 'granted' ? 'Avisos del sistema: <b>activados</b>.' : perm === 'denied' ? 'Bloqueaste los avisos: los verás como mensaje dentro de la app (puedes permitirlos en la configuración del navegador).' : 'Sin permiso todavía: los recordatorios salen como mensaje dentro de la app.'}</p>
@@ -936,9 +1055,9 @@ function tarjetaConfigSup() {
   S.sup.items.forEach((it, i) => {
     h += `<li class="supcfg"><label class="check"><input type="checkbox" data-act="supActivo" data-i="${i}"${it.activo ? ' checked' : ''}> <span>${esc(it.n)}</span></label>
       <label class="lbl">Dosis<input data-act="supDosis" data-i="${i}" value="${esc(it.dosis || '')}"></label>
-      ${it.id === 'batida' ? `<div class="tres"><label class="lbl">Proteína por scoop (g)<input type="number" inputmode="decimal" min="0" step="0.5" data-act="supNum" data-campo="gScoop" data-i="${i}" value="${it.gScoop ?? ''}"></label>
-        <label class="lbl">kcal por scoop<input type="number" inputmode="numeric" min="0" step="1" data-act="supNum" data-campo="kScoop" data-i="${i}" value="${it.kScoop ?? ''}"></label>
-        <label class="lbl">Scoops por batida<input type="number" inputmode="decimal" min="0.5" step="0.5" data-act="supNum" data-campo="scoops" data-i="${i}" value="${it.scoops ?? 1}"></label></div>` : ''}
+      ${it.id === 'batida' ? `<div class="tres"><label class="lbl">Proteína por scoop (g)<input type="number" inputmode="decimal" min="0" step="0.5" data-act="supNum" data-campo="gScoop" data-i="${i}" value="${esc(it.gScoop ?? '')}"></label>
+        <label class="lbl">kcal por scoop<input type="number" inputmode="numeric" min="0" step="1" data-act="supNum" data-campo="kScoop" data-i="${i}" value="${esc(it.kScoop ?? '')}"></label>
+        <label class="lbl">Scoops por batida<input type="number" inputmode="decimal" min="0.5" step="0.5" data-act="supNum" data-campo="scoops" data-i="${i}" value="${esc(it.scoops ?? 1)}"></label></div>` : ''}
       ${it.id !== 'creatina' && it.id !== 'batida' ? `<button class="x" data-act="supQuitar" data-i="${i}" aria-label="Quitar ${esc(it.n)}">×</button>` : ''}</li>`;
   });
   h += `</ul><div class="dos"><label class="lbl">Otro suplemento<input id="supNuevoN" placeholder="Omega 3"></label><label class="lbl">Dosis<input id="supNuevoD" placeholder="1 cápsula"></label></div>
@@ -983,7 +1102,7 @@ async function guardarComida() {
   if (!it.length && !fotoDraft) { aviso('Escribe qué comiste o toma una foto.'); return; }
   const [hh, mm] = ($('hora').value || '12:00').split(':').map(Number), d = new Date(); d.setHours(hh, mm, 0, 0);
   const id = 'c' + Date.now();
-  const items = it.map(x => x.f ? { id: x.f.id, n: x.f.n, c: cantidadTxt(x), g: Math.round(x.g), p: x.p, k: x.k } : { n: x.txt, c: 'a mano', g: 0, p: +x.pManual || 0, k: 0 });
+  const items = it.map(x => x.f ? { id: x.f.id, n: x.f.n, c: cantidadTxt(x), g: Math.round(x.g), p: x.p, k: x.k } : { n: String(x.txt).slice(0, TXT_MAX), c: 'a mano', g: 0, p: +x.pManual || 0, k: 0 });
   const log = { id, t: d.getTime(), comida: $('comida').value, items, p: r1(items.reduce((a, x) => a + x.p, 0)), k: items.reduce((a, x) => a + x.k, 0), foto: !!fotoDraft, src: 'texto' };
   if (fotoDraft) { try { await fotoPut(id, fotoDraft); } catch (e) { log.foto = false; aviso('La foto no se pudo guardar.'); } }
   S.logs.push(log); guardar();
@@ -1029,18 +1148,18 @@ async function buscarProducto(code) {
     const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json?fields=product_name,product_name_es,brands,nutriments,serving_quantity`);
     const d = await r.json();
     const pr = d && d.status === 1 && d.product;
-    const nom = pr ? (pr.product_name_es || pr.product_name || 'Producto') + (pr.brands ? ` (${pr.brands.split(',')[0]})` : '') : '';
-    const p100 = pr && pr.nutriments ? pr.nutriments.proteins_100g : null, k100 = pr && pr.nutriments ? pr.nutriments['energy-kcal_100g'] : null;
+    const nom = pr ? ((txtDe(pr.product_name_es) || txtDe(pr.product_name) || 'Producto') + (typeof pr.brands === 'string' && pr.brands ? ` (${pr.brands.split(',')[0]})` : '')).slice(0, TXT_MAX) : '';
+    const nu = pr && esObj(pr.nutriments) ? pr.nutriments : {}, p100 = numEn(nu.proteins_100g, 0, 100), k100 = numEn(nu['energy-kcal_100g'], 0, 1000);
     box.innerHTML = `${pr ? `<p><b>${esc(nom)}</b></p>` : '<p class="muted">No está en la base. Llena los datos de la etiqueta y queda guardado para la próxima vez.</p>'}
       <label class="lbl">Nombre <input id="prNom" value="${esc(nom)}" placeholder="Yogur de fresa"></label>
-      <div class="dos"><label class="lbl">Proteína por 100 g <input id="prP" type="number" inputmode="decimal" step="0.1" value="${p100 ?? ''}"></label>
-      <label class="lbl">Cuánto comiste (g) <input id="prG" type="number" inputmode="decimal" step="1" value="${Math.round((pr && pr.serving_quantity) || 100)}"></label></div>
-      <input id="prK" type="hidden" value="${k100 ?? 0}"><input id="prCode" type="hidden" value="${code}">
+      <div class="dos"><label class="lbl">Proteína por 100 g <input id="prP" type="number" inputmode="decimal" step="0.1" value="${esc(p100 ?? '')}"></label>
+      <label class="lbl">Cuánto comiste (g) <input id="prG" type="number" inputmode="decimal" step="1" value="${esc(Math.round(numEn(pr && pr.serving_quantity, 1, 5000) || 100))}"></label></div>
+      <input id="prK" type="hidden" value="${esc(k100 ?? 0)}"><input id="prCode" type="hidden" value="${esc(code)}">
       <button class="prim ancho" data-act="agregarProducto">Agregar</button>`;
   } catch (e) { box.innerHTML = '<p class="muted">Sin conexión. Prueba luego, o escribe el alimento arriba.</p>'; }
 }
 function agregarProducto() {
-  const n = $('prNom').value.trim() || 'Producto', p = parseFloat(($('prP').value || '0').replace(',', '.')), g = parseFloat($('prG').value) || 100, k = parseFloat($('prK').value) || 0, code = $('prCode').value;
+  const n = $('prNom').value.trim().slice(0, TXT_MAX) || 'Producto', p = parseFloat(($('prP').value || '0').replace(',', '.')), g = parseFloat($('prG').value) || 100, k = parseFloat($('prK').value) || 0, code = $('prCode').value;
   if (!(p >= 0)) { aviso('Pon la proteína por 100 g de la etiqueta.'); return; }
   let f = S.mis.find(x => x.code === code && code) || S.mis.find(x => norm(x.n) === norm(n));
   if (!f) { f = { id: 'm' + Date.now(), n, a: [norm(n)], p, k, u: { porcion: g }, d: 'porcion', code }; S.mis.push(f); }
@@ -1058,21 +1177,35 @@ async function entregar(nombre, texto, tipo) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = nombre; document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); aviso('Descargado: ' + nombre);
 }
+/* Importar un respaldo: el archivo se trata como datos no confiables. Cada campo se valida igual que al leer el
+   almacenamiento (estadoDe); lo inválido se descarta y se cuenta en impDesc. Las fotos nunca vienen en el respaldo
+   (foto: false); no se acepta ninguna URL de imagen. Devuelve cuántas comidas nuevas entraron. */
+const IMPORT_MAX_BYTES = 20 * 1048576;
+let impDesc = 0;
 function importar(d) {
-  if (!d || d.app !== 'comida' || !Array.isArray(d.logs)) throw new Error('formato');
+  if (!esObj(d) || d.app !== 'comida' || !Array.isArray(d.logs)) throw new Error('formato');
+  const desc = nuevoDesc();
   const ids = new Set(S.logs.map(l => l.id)); let n = 0;
-  d.logs.forEach(l => { if (l && l.id && !ids.has(l.id)) { S.logs.push(Object.assign(l, { foto: false })); n++; } });
-  for (const k in d.agua || {}) S.agua[k] = Math.max(S.agua[k] || 0, d.agua[k]);
-  (d.mis || []).forEach(f => { if (!S.mis.some(x => x.id === f.id)) S.mis.push(f); });
-  if (!S.cfg.peso && d.cfg && d.cfg.peso) S.cfg = Object.assign(S.cfg, d.cfg, { rec: Object.assign(recInicial(), S.cfg.rec, esObj(d.cfg.rec) ? d.cfg.rec : {}) });
-  // Campos de v7 (respaldos viejos no los traen): se suman sin pisar lo que ya hay.
-  if (esObj(d.pesos)) { for (const k in d.pesos) if (S.pesos[k] == null && +d.pesos[k] > 0) S.pesos[k] = +d.pesos[k]; const u = diasPeso().pop(); if (u) S.cfg.peso = +S.pesos[u]; }
-  if (Array.isArray(d.favs)) d.favs.forEach(f => { if (f && f.sig && !S.favs.some(x => x.sig === f.sig)) S.favs.push(f); });
-  if (esObj(d.sup)) {
-    (d.sup.items || []).forEach(it => { if (it && it.id && !S.sup.items.some(x => x.id === it.id)) S.sup.items.push(it); });
-    for (const k in d.sup.hecho || {}) S.sup.hecho[k] = Object.assign({}, d.sup.hecho[k], S.sup.hecho[k] || {});
+  logsDeDatos(d.logs, desc).forEach(l => { if (!ids.has(l.id)) { ids.add(l.id); S.logs.push(Object.assign(l, { foto: false })); n++; } });
+  const agua = aguaDe(d.agua, desc); for (const k in agua) S.agua[k] = Math.max(S.agua[k] || 0, agua[k]);
+  misDe(d.mis, desc).forEach(f => { if (!S.mis.some(x => x.id === f.id)) S.mis.push(f); });
+  if (!S.cfg.peso && esObj(d.cfg) && d.cfg.peso) {
+    const c = cfgDe(d.cfg, desc), tiene = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    if (c.peso) {   // como antes: solo se toman los campos que trae el archivo (ya validados)
+      ['peso', 'factor', 'aguaMeta', 'mant', 'objetivo', 'ajusteT'].forEach(k => { if (tiene(d.cfg, k) && tiene(c, k)) S.cfg[k] = c[k]; });
+      const r = {}; if (esObj(d.cfg.rec)) Object.keys(c.rec).forEach(k => { if (tiene(d.cfg.rec, k)) r[k] = c.rec[k]; });
+      S.cfg.rec = Object.assign(recInicial(), S.cfg.rec, r);
+    } else desc.n++;
   }
-  if (esObj(d.precios)) for (const k in d.precios) if (S.precios[k] == null) S.precios[k] = d.precios[k];
+  // Campos de v7 (respaldos viejos no los traen): se suman sin pisar lo que ya hay.
+  if (d.pesos != null) { const ps = pesosDe(d.pesos, desc); for (const k in ps) if (S.pesos[k] == null) S.pesos[k] = ps[k]; const u = diasPeso().pop(); if (u) S.cfg.peso = +S.pesos[u]; }
+  if (d.favs != null) favsDe(d.favs, desc).forEach(f => { if (!S.favs.some(x => x.sig === f.sig)) S.favs.push(f); });
+  if (esObj(d.sup)) {
+    if (d.sup.items != null) (supItemsDe(d.sup.items, desc) || []).forEach(it => { if (!S.sup.items.some(x => x.id === it.id)) S.sup.items.push(it); });
+    const h = hechoDe(d.sup.hecho, desc); for (const k in h) S.sup.hecho[k] = Object.assign({}, h[k], S.sup.hecho[k] || {});
+  } else if (d.sup != null) desc.n++;
+  if (d.precios != null) { const pr = preciosDe(d.precios, desc); for (const k in pr) if (S.precios[k] == null) S.precios[k] = pr[k]; }
+  impDesc = desc.n;
   guardar(); return n;
 }
 
@@ -1168,7 +1301,7 @@ document.addEventListener('click', async e => {
     case 'precios': mostrarPrecios = !mostrarPrecios; render(); break;
     case 'supAgregar': {
       const n = $('supNuevoN').value.trim(); if (!n) { aviso('Escribe el nombre del suplemento.'); break; }
-      S.sup.items.push({ id: 's' + Date.now(), n, dosis: $('supNuevoD').value.trim(), activo: true }); guardar(); render(); break;
+      S.sup.items.push({ id: 's' + Date.now(), n: n.slice(0, TXT_MAX), dosis: $('supNuevoD').value.trim().slice(0, TXT_MAX), activo: true }); guardar(); render(); break;
     }
     case 'supQuitar': S.sup.items.splice(i, 1); guardar(); render(); break;
     case 'importar': $('importInput').click(); break;
@@ -1195,14 +1328,18 @@ document.addEventListener('change', async e => {
   if (el.id === 'recDesde') { S.cfg.rec.desde = +el.value; guardar(); }
   if (el.id === 'recHasta') { S.cfg.rec.hasta = +el.value; guardar(); }
   if (a === 'supActivo') { S.sup.items[+el.dataset.i].activo = el.checked; guardar(); render(); }
-  if (a === 'supDosis') { S.sup.items[+el.dataset.i].dosis = el.value.trim(); guardar(); }
+  if (a === 'supDosis') { S.sup.items[+el.dataset.i].dosis = el.value.trim().slice(0, TXT_MAX); guardar(); }
   if (a === 'supNum') { const v = parseFloat(String(el.value).replace(',', '.')); if (v >= 0) { S.sup.items[+el.dataset.i][el.dataset.campo] = v; guardar(); } }
   if (el.id === 'peso') { const v = parseFloat(String(el.value).replace(',', '.')); if (v >= 30 && v <= 250) { S.cfg.peso = v; guardar(); render(); aviso(`Meta: ${meta()} g de proteína al día.`); } }
   if (el.id === 'mant') { const v = parseInt(el.value, 10); S.cfg.mant = v >= 1000 && v <= 6000 ? v : null; guardar(); render(); }
   if (el.id === 'aguaMeta') { const v = parseInt(el.value, 10); if (v >= 1 && v <= 24) { S.cfg.aguaMeta = v; guardar(); } }
   if (el.id === 'fotoInput' && el.files[0]) { try { fotoDraft = await reducir(el.files[0]); } catch (err) { aviso('No se pudo leer la foto.'); } el.value = ''; pintarFotoDraft(); }
   if (el.id === 'importInput' && el.files[0]) {
-    try { const n = importar(JSON.parse(await el.files[0].text())); aviso(n ? `Importadas ${n} comidas.` : 'Nada nuevo: ya tenías todo.'); render(); }
+    try {
+      if (el.files[0].size > IMPORT_MAX_BYTES) throw new Error('grande');
+      const n = importar(JSON.parse(await el.files[0].text()));
+      aviso((n ? `Importadas ${n} comidas.` : 'Nada nuevo: ya tenías todo.') + (impDesc ? ` Se descartaron ${impDesc} ${impDesc === 1 ? 'dato no válido' : 'datos no válidos'}.` : '')); render();
+    }
     catch (err) { aviso('Ese archivo no es un respaldo de Comida.'); }
     el.value = '';
   }
@@ -1220,3 +1357,4 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   }).catch(() => {});
 }
 render();
+if (descCarga.n) aviso(`Se ignoraron ${descCarga.n} ${descCarga.n === 1 ? 'dato dañado' : 'datos dañados'} guardados en este dispositivo.`);

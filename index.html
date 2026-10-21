@@ -21,7 +21,7 @@
 @media (prefers-color-scheme: dark){:root{
   --bg:#111813; --surface:#19221c; --ink:#e6eee8; --muted:#9bab9f; --line:#2b372f;
   --accent:#5cc28f; --accent-soft:#1f3328; --on-accent:#0d1610; --sun:#e9b94a; --water:#7fa8e8; --ent:#f0435a; color-scheme:dark}}
-*{box-sizing:border-box}
+*{box-sizing:border-box} [hidden]{display:none!important}
 html,body{margin:0;background:var(--bg)}
 body{color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.45;-webkit-tap-highlight-color:transparent}
 main{max-width:520px;margin:0 auto;padding:max(14px,env(safe-area-inset-top,0px)) 16px calc(96px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:12px}
@@ -117,11 +117,57 @@ nav{position:fixed;left:0;right:0;bottom:0;display:grid;grid-template-columns:re
 nav button{border:0;min-height:54px;flex-direction:column;gap:2px;font-size:12px;font-weight:500;color:var(--muted);border-radius:12px;padding:0}
 nav button[aria-current="page"]{background:var(--accent-soft);color:var(--accent)}
 nav svg{width:22px;height:22px}
+/* v7: recuperación, sugerencias, peso, suplementos, favoritas, precios, recordatorios */
+.fill.medio{background:var(--sun)} .fill.bajo{background:var(--ent)}
+.compo{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.compo li{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-size:14px}
+.compo .track{grid-column:1/-1;height:6px}
+.sugp{display:flex;flex-direction:column;gap:6px;background:var(--accent-soft);border-radius:12px;padding:10px}
+.opc{justify-content:space-between;text-align:left;background:var(--surface);gap:10px;padding:8px 12px;font-weight:500}
+.opc b{white-space:nowrap;color:var(--accent)}
+.enlace{border:0;min-height:36px;padding:0;color:var(--accent);align-self:flex-start}
+.sups{display:flex;flex-direction:column;gap:6px}
+.sup{justify-content:flex-start;text-align:left;gap:10px;font-weight:600;padding:6px 12px}
+.sup small{display:block;font-weight:400;color:var(--muted);font-size:13px}
+.sup .ck{flex:none;width:26px;height:26px;border-radius:50%;border:2px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:14px}
+.sup.on{border-color:var(--accent);background:var(--accent-soft)}
+.sup.on .ck{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.linea li{grid-template-columns:auto 1fr auto auto auto;gap:6px}
+.estrella{font-size:20px;min-width:36px;padding:0}
+.estrella.on{color:var(--sun)}
+.lista-r{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.lista-r li{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.lista-r li.supcfg{grid-template-columns:1fr;gap:6px;position:relative}
+.supcfg .x{position:absolute;right:0;top:4px}
+.check{display:flex;gap:8px;align-items:center;font-size:14px;font-weight:600}
+.check input{width:20px;min-height:20px;accent-color:var(--accent);flex:none}
+.tres{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;align-items:end}
+.tres input,.tres select{padding:8px 6px}
+.precios{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.precios li{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--line);font-size:14px}
+.precios small{display:block;font-size:12px}
+.precios input{min-height:38px;padding:6px 8px;text-align:right}
+.precios input::placeholder{color:var(--muted);opacity:.75}
+.graf-peso svg{width:100%;height:auto;display:block}
+.graf-peso text{font-size:11px;fill:var(--muted);font-family:var(--body)}
+.graf-peso .gl{stroke:var(--line);stroke-width:1}
+.graf-peso .tl{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
+.graf-peso .pd{fill:var(--water);fill-opacity:.55;stroke:var(--surface);stroke-width:1.5}
+.leyenda-peso{display:flex;gap:16px;flex-wrap:wrap}
+.leyenda-peso span{display:inline-flex;align-items:center;gap:6px}
+.pd-l{width:9px;height:9px;border-radius:50%;background:var(--water);opacity:.7;display:inline-block}
+.tl-l{width:18px;height:3px;border-radius:2px;background:var(--accent);display:inline-block}
+#recAviso{display:flex;gap:8px;align-items:center;background:var(--surface);border:2px solid var(--water);border-radius:16px;padding:10px 6px 10px 14px}
+#recAviso[hidden]{display:none}
+#recAviso>div{flex:1;display:flex;flex-direction:column;font-size:14px}
+#recAviso .prim{flex:none}
+@media (max-width:380px){.tres{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
 <main>
   <header><h1>Comida</h1></header>
+  <div id="recAviso" role="alert" hidden></div>
   <div id="vista" aria-live="polite"></div>
 </main>
 <input id="fotoInput" type="file" accept="image/*" capture="environment" hidden>

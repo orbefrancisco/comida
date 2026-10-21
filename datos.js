@@ -153,3 +153,27 @@ const PLAN_INICIAL = [
   ['Batata con queso frito', FUERA, 'Sándwich de pollo desmenuzado'],
   ['Mangú con los tres golpes', 'Sancocho', 'Sopa de pollo con víveres']
 ];
+
+// Precios APROXIMADOS en pesos dominicanos (RD$), solo para empezar: estimados a mano de supermercado/colmado,
+// NO son precios oficiales. Cada quien los cambia en Plan → Precios y se guardan en S.precios.
+// Ingredientes del plan: por libra (los que se miden en g), por litro (ml) o por unidad (ud).
+const PRECIO_ING = {
+  platanoV: 30, guineo: 10, yuca: 30, name: 45, batata: 30, auyama: 30, mazorca: 35,
+  salami: 180, pollo: 90, pechuga: 160, res: 280, cerdo: 180, pescado: 250, longaniza: 200,
+  huevo: 9, queso: 240, leche: 85,
+  cebollaR: 15, tomate: 15, lechuga: 60, aguacate: 60, aji: 10, repollo: 80, zanahoria: 10,
+  arroz: 40, habichuelas: 100, guandules: 65, avena: 80, pan: 8, coco: 225, espagueti: 55, atun: 80, aceitunas: 250
+};
+// Alimentos sueltos: por la unidad con que la app los cuenta por defecto (d), p. ej. huevo por unidad, atún por lata,
+// pechuga por porción de 150 g ya cocida; platos de la calle o del comedor, por plato.
+const PRECIO_ALI = {
+  huevo: 9, clara: 9, pechuga: 70, pollo_guisado: 60, muslo: 25, picapollo: 90, res: 90, molida: 60, bistec: 100,
+  chuleta: 60, pernil: 90, pescado: 100, camaron: 120, atun: 80, sardina: 60, salami: 10, jamon: 10, longaniza: 35,
+  salchicha: 15, queso_freir: 16, queso: 10, queso_crema: 8, leche: 21, yogur: 45, griego: 70, whey: 65,
+  arroz: 5, moro: 12, moro_guandules: 12, locrio: 70, habichuelas: 15, guandules: 15, lentejas: 15, garbanzos: 25,
+  espagueti: 20, pan: 8, pan_molde: 6, casabe: 10, avena: 14, cereal: 15, mangu: 50, tostones: 8, maduro: 8,
+  platano: 30, yuca: 15, batata: 15, guineitos: 8, papa: 15, papas_fritas: 120, aguacate: 10, ensalada: 20,
+  guineo: 10, manzana: 35, mango: 40, fruta: 25, jugo: 50, mani: 15, mantequilla_mani: 10, almendras: 40,
+  cafe_leche: 15, refresco: 45, bandera: 250, tres_golpes: 200, sancocho: 250, sopa: 150, crema_auyama: 100,
+  empanada: 50, quipe: 40, chimi: 200, hamburguesa: 300, pizza: 150, sandwich: 150, mofongo: 300
+};

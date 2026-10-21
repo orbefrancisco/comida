@@ -1,6 +1,6 @@
 // Copia local de la app para que funcione sin internet.
 // Al cambiar cualquier archivo de la app, sube VERSION para que el celular descargue la nueva.
-const VERSION = 'comida-v6';
+const VERSION = 'comida-v7';
 const ARCHIVOS = ['./', './index.html', './app.js', './datos.js', './manifest.json', './icono-192.png', './icono-512.png', './icono-maskable-512.png'];
 
 self.addEventListener('install', e => {
@@ -32,4 +32,13 @@ self.addEventListener('fetch', e => {
     if (!guardada) return red;
     return Promise.race([red.catch(() => guardada), new Promise(r => setTimeout(() => r(guardada), 3000))]);
   })());
+});
+
+// Al tocar un recordatorio: volver a la app (o abrirla).
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
+    const c = cs.find(x => x.url.startsWith(self.registration.scope));
+    return c ? c.focus() : self.clients.openWindow(self.registration.scope);
+  }));
 });
